@@ -1,0 +1,7 @@
+Place local encoder model directories here:
+
+- hf_model/bert-large-uncased
+- hf_model/roberta-large
+- hf_model/llama2-7b-chat-hf
+
+You can also set BERT_MODEL_PATH, ROBERTA_MODEL_PATH, and LLAMA2_MODEL_PATH.

@@ -1,0 +1,7 @@
+Place Hugging Face load_from_disk datasets here:
+
+- dataset/fraud_binary
+- dataset/fraud_multi
+
+Both datasets should provide train/test splits with text and label columns.
+You can also set DATASET_ROOT to another directory.
