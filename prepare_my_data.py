@@ -1,78 +1,163 @@
-import pandas as pd
+import argparse
+import csv
+import json
+from pathlib import Path
+
 from datasets import Dataset, DatasetDict
 
-# ==========================================
-# 1. 读取原始 CSV 数据 (已经分好了训练集和测试集)
-# ==========================================
-train_path = "欺诈通话数据集/训练集结果.csv"
-test_path = "欺诈通话数据集/测试集结果.csv"
 
-print("正在读取 CSV 文件...")
-df_train = pd.read_csv(train_path)
-df_test = pd.read_csv(test_path)
-
-# 清理空数据：去掉对话内容为空的行
-df_train = df_train.dropna(subset=['specific_dialogue_content'])
-df_test = df_test.dropna(subset=['specific_dialogue_content'])
-
-# ==========================================
-# 2. 制作【任务A】的数据集 (二分类：诈骗 vs 非诈骗)
-# ==========================================
-print("\n正在制作任务 A (二分类) 的数据集...")
-
-def process_task_a(df):
-    df_a = df[['specific_dialogue_content', 'is_fraud']].copy()
-    # 将 TRUE/FALSE 转换为 1 和 0 (兼容字符串和布尔值读取)
-    df_a['label'] = df_a['is_fraud'].apply(lambda x: 1 if str(x).strip().upper() == 'TRUE' or x == True else 0)
-    df_a = df_a.rename(columns={'specific_dialogue_content': 'text'})
-    return df_a[['text', 'label']]
-
-train_a = process_task_a(df_train)
-test_a = process_task_a(df_test)
-
-# 直接拼接为 Hugging Face 数据集
-dataset_a = DatasetDict({
-    'train': Dataset.from_pandas(train_a, preserve_index=False),
-    'test': Dataset.from_pandas(test_a, preserve_index=False)
-})
-
-# 直接保存在当前目录的 fraud_binary 文件夹下
-dataset_a.save_to_disk("./fraud_binary")
-print("任务 A 数据集保存成功！路径：./fraud_binary")
+DEFAULT_TRAIN_CSV = "raw_data/训练集结果.csv"
+DEFAULT_TEST_CSV = "raw_data/测试集结果.csv"
+DEFAULT_OUTPUT_ROOT = "dataset"
+TEXT_COLUMN = "specific_dialogue_content"
+FRAUD_COLUMN = "is_fraud"
+TYPE_COLUMN = "fraud_type"
 
 
-# ==========================================
-# 3. 制作【任务B】的数据集 (多分类：具体诈骗类型)
-# ==========================================
-print("\n正在制作任务 B (多分类) 的数据集...")
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build fraud_binary and fraud_multi Hugging Face datasets from the "
+            "course fraud-call CSV files."
+        )
+    )
+    parser.add_argument("--train_csv", default=DEFAULT_TRAIN_CSV)
+    parser.add_argument("--test_csv", default=DEFAULT_TEST_CSV)
+    parser.add_argument("--output_root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--mapping_output",
+        default=None,
+        help="Optional path for the fraud_type to label-id mapping JSON.",
+    )
+    return parser.parse_args()
 
-# 任务B只需要“已经是诈骗”的电话来进行细分类
-df_train_b = df_train[df_train['is_fraud'].apply(lambda x: str(x).strip().upper() == 'TRUE' or x == True)].copy()
-df_test_b = df_test[df_test['is_fraud'].apply(lambda x: str(x).strip().upper() == 'TRUE' or x == True)].copy()
 
-# 去掉没有填写 fraud_type 的行
-df_train_b = df_train_b.dropna(subset=['fraud_type'])
-df_test_b = df_test_b.dropna(subset=['fraud_type'])
+def is_true(value):
+    return str(value).strip().upper() == "TRUE" or value is True
 
-df_train_b = df_train_b.rename(columns={'specific_dialogue_content': 'text'})
-df_test_b = df_test_b.rename(columns={'specific_dialogue_content': 'text'})
 
-# 获取所有可能的诈骗类型，建立统一的映射字典
-all_fraud_types = pd.concat([df_train_b['fraud_type'], df_test_b['fraud_type']]).unique().tolist()
-type_to_id = {t: i for i, t in enumerate(all_fraud_types)}
+def read_csv_rows(path):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"CSV not found: {path}")
 
-print("【重要】任务B的标签映射关系：", type_to_id)
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV has no header: {path}")
+        required = {TEXT_COLUMN, FRAUD_COLUMN, TYPE_COLUMN}
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise ValueError(f"{path} is missing columns: {sorted(missing)}")
 
-# 映射标签为整数 (0, 1, 2...)
-df_train_b['label'] = df_train_b['fraud_type'].map(type_to_id)
-df_test_b['label'] = df_test_b['fraud_type'].map(type_to_id)
+        rows = []
+        for row in reader:
+            text = (row.get(TEXT_COLUMN) or "").strip()
+            if not text:
+                continue
+            rows.append(row)
+        return rows
 
-dataset_b = DatasetDict({
-    'train': Dataset.from_pandas(df_train_b[['text', 'label']], preserve_index=False),
-    'test': Dataset.from_pandas(df_test_b[['text', 'label']], preserve_index=False)
-})
 
-# 直接保存在当前目录的 fraud_multi 文件夹下
-dataset_b.save_to_disk("./fraud_multi")
-print("任务 B 数据集保存成功！路径：./fraud_multi")
-print(f"任务 B 一共有 {len(all_fraud_types)} 个诈骗类别。")
+def build_binary_rows(rows):
+    return [
+        {
+            "text": row[TEXT_COLUMN],
+            "label": 1 if is_true(row.get(FRAUD_COLUMN)) else 0,
+        }
+        for row in rows
+    ]
+
+
+def build_multi_source(rows):
+    multi_rows = []
+    for row in rows:
+        fraud_type = (row.get(TYPE_COLUMN) or "").strip()
+        if is_true(row.get(FRAUD_COLUMN)) and fraud_type:
+            multi_rows.append(
+                {
+                    "text": row[TEXT_COLUMN],
+                    TYPE_COLUMN: fraud_type,
+                }
+            )
+    return multi_rows
+
+
+def build_label_mapping(train_multi, test_multi):
+    type_to_id = {}
+    for row in train_multi + test_multi:
+        fraud_type = row[TYPE_COLUMN]
+        if fraud_type not in type_to_id:
+            type_to_id[fraud_type] = len(type_to_id)
+    return type_to_id
+
+
+def apply_multi_labels(rows, type_to_id):
+    return [
+        {
+            "text": row["text"],
+            "label": type_to_id[row[TYPE_COLUMN]],
+        }
+        for row in rows
+    ]
+
+
+def save_dataset(dataset, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.save_to_disk(str(path))
+
+
+def main():
+    args = parse_args()
+    output_root = Path(args.output_root)
+
+    print("Reading source CSV files...")
+    train_rows = read_csv_rows(args.train_csv)
+    test_rows = read_csv_rows(args.test_csv)
+
+    print("Building fraud_binary dataset...")
+    binary_dataset = DatasetDict(
+        {
+            "train": Dataset.from_list(build_binary_rows(train_rows)),
+            "test": Dataset.from_list(build_binary_rows(test_rows)),
+        }
+    )
+    binary_path = output_root / "fraud_binary"
+    save_dataset(binary_dataset, binary_path)
+
+    print("Building fraud_multi dataset...")
+    train_multi_source = build_multi_source(train_rows)
+    test_multi_source = build_multi_source(test_rows)
+    type_to_id = build_label_mapping(train_multi_source, test_multi_source)
+
+    multi_dataset = DatasetDict(
+        {
+            "train": Dataset.from_list(apply_multi_labels(train_multi_source, type_to_id)),
+            "test": Dataset.from_list(apply_multi_labels(test_multi_source, type_to_id)),
+        }
+    )
+    multi_path = output_root / "fraud_multi"
+    save_dataset(multi_dataset, multi_path)
+
+    mapping_output = Path(args.mapping_output) if args.mapping_output else output_root / "fraud_multi_label_mapping.json"
+    mapping_output.parent.mkdir(parents=True, exist_ok=True)
+    with mapping_output.open("w", encoding="utf-8") as f:
+        json.dump(type_to_id, f, ensure_ascii=False, indent=2)
+
+    binary_test_positive = sum(int(label) == 1 for label in binary_dataset["test"]["label"])
+    if binary_test_positive != len(multi_dataset["test"]):
+        raise ValueError(
+            "fraud_multi/test is not aligned with positive fraud_binary/test rows: "
+            f"binary positives={binary_test_positive}, multi rows={len(multi_dataset['test'])}"
+        )
+
+    print(f"Saved binary dataset: {binary_path}")
+    print(f"Saved multi dataset: {multi_path}")
+    print(f"Saved label mapping: {mapping_output}")
+    print(f"fraud_binary train/test: {len(binary_dataset['train'])}/{len(binary_dataset['test'])}")
+    print(f"fraud_multi train/test: {len(multi_dataset['train'])}/{len(multi_dataset['test'])}")
+    print(f"fraud_multi classes: {len(type_to_id)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -4,14 +4,30 @@ This package contains code and reproducibility instructions only. It does not in
 
 ## What You Need To Provide
 
-Prepare two Hugging Face `datasets.load_from_disk` directories:
+Prepare or generate two Hugging Face `datasets.load_from_disk` directories:
 
 ```text
 dataset/fraud_binary
 dataset/fraud_multi
 ```
 
-Both datasets should contain `train` and `test` splits with `text` and `label` columns. `fraud_binary` is the binary fraud detection task. `fraud_multi` contains fraud samples with fraud type labels and is aligned with positive fraud samples in `fraud_binary/test`.
+Both datasets must contain `train` and `test` splits with `text` and `label` columns.
+
+- `fraud_binary`: binary fraud detection. `label=1` means fraud and `label=0` means non-fraud.
+- `fraud_multi`: fraud-type classification. It contains only fraud samples, and its rows must be aligned with the `label=1` rows in `fraud_binary` for the same split. This alignment is required by `adversarial_rewrite/export_attack_source.py`.
+
+The default course CSV inputs are expected here:
+
+```text
+raw_data/训练集结果.csv
+raw_data/测试集结果.csv
+```
+
+The CSV files must contain these columns:
+
+```text
+specific_dialogue_content,interaction_strategy,call_type,is_fraud,fraud_type
+```
 
 Download or place encoder models here:
 
@@ -42,7 +58,40 @@ pip install -r requirements.txt
 
 The scripts whitelist CUDA ids `0`, `1`, and `2`. If your machine uses different ids, update `ALLOWED_CUDA_IDS` in the scripts or run on matching ids.
 
-## 1. Generate Baseline Embeddings
+## 1. Generate Fraud Datasets
+
+If you start from the provided course CSV files, build the two Hugging Face datasets with:
+
+```bash
+python prepare_my_data.py
+```
+
+Default outputs:
+
+```text
+dataset/fraud_binary
+dataset/fraud_multi
+dataset/fraud_multi_label_mapping.json
+```
+
+Generation logic:
+
+- `fraud_binary` keeps all non-empty dialogue rows from train/test CSV files and converts `is_fraud` to integer labels: `TRUE -> 1`, all other values -> `0`.
+- `fraud_multi` first filters to `is_fraud == TRUE`, drops rows without `fraud_type`, then maps each fraud type to an integer label using the combined train/test fraud-type order.
+- The script checks that `fraud_multi/test` has the same row count as the positive (`label=1`) subset of `fraud_binary/test`, because adversarial source export zips these rows by order.
+
+Useful overrides:
+
+```bash
+python prepare_my_data.py \
+  --train_csv raw_data/训练集结果.csv \
+  --test_csv raw_data/测试集结果.csv \
+  --output_root dataset
+```
+
+If datasets already exist elsewhere, skip this step and set `DATASET_ROOT` to the parent directory that contains `fraud_binary/` and `fraud_multi/`.
+
+## 2. Generate Baseline Embeddings
 
 Run all three encoders for both fraud tasks:
 
@@ -67,7 +116,7 @@ roberta_embedding/fraud_multi/dataset_tensor/
 llama2_embedding/fraud_multi/dataset_tensor/
 ```
 
-## 2. Train Baseline Models
+## 3. Train Baseline Models
 
 ```bash
 python main.py 0 fraud_binary 10 0.1 1024 0.0001 --seed 42
@@ -76,7 +125,7 @@ python main.py 0 fraud_multi 10 0.1 1024 0.0001 --seed 42
 
 Checkpoints are saved under `checkpoints/`.
 
-## 3. Export Attack Source
+## 4. Export Attack Source
 
 ```bash
 python adversarial_rewrite/export_attack_source.py
@@ -89,7 +138,9 @@ adversarial_data/source/fraud_test_attack_source.json
 adversarial_data/source/fraud_test_attack_source.summary.json
 ```
 
-## 4. Generate Rewrite JSON Files
+This step loads `dataset/fraud_binary` and `dataset/fraud_multi` by default. It exports the positive rows from `fraud_binary/test` and attaches the aligned fraud-type labels from `fraud_multi/test`.
+
+## 5. Generate Rewrite JSON Files
 
 Example with local Ollama native API:
 
@@ -117,7 +168,7 @@ python adversarial_rewrite/validate_rewrites.py \
   --summary_md adversarial_data/validated/rewrite_validation_summary.md
 ```
 
-## 5. Build Adversarial Tensors
+## 6. Build Adversarial Tensors
 
 For each rewrite JSON and each encoder:
 
@@ -141,6 +192,8 @@ python adversarial_rewrite/build_adv_dataset.py \
   --cuda_no 0
 ```
 
+By default, binary adversarial tensors keep the complete `fraud_binary/test` split: non-fraud rows are unchanged and fraud rows are replaced by rewrites. Multi-class adversarial tensors contain the rewritten fraud subset and use the aligned `multi_label` values from the rewrite source.
+
 Verify tensor consistency:
 
 ```bash
@@ -149,7 +202,7 @@ python adversarial_rewrite/verify_adv_tensors.py \
   --summary_json adversarial_data/validated/adv_tensor_summary.json
 ```
 
-## 6. Evaluate Robustness
+## 7. Evaluate Robustness
 
 Replace checkpoint names with your generated files:
 

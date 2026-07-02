@@ -3,5 +3,35 @@ Place Hugging Face load_from_disk datasets here:
 - dataset/fraud_binary
 - dataset/fraud_multi
 
-Both datasets should provide train/test splits with text and label columns.
-You can also set DATASET_ROOT to another directory.
+You can generate them from the default course CSV files with:
+
+```bash
+python prepare_my_data.py
+```
+
+Default source files:
+
+- raw_data/训练集结果.csv
+- raw_data/测试集结果.csv
+
+Required CSV columns:
+
+```text
+specific_dialogue_content,interaction_strategy,call_type,is_fraud,fraud_type
+```
+
+Expected dataset schema:
+
+- Both datasets provide `train` and `test` splits.
+- Both splits contain `text` and `label` columns.
+- `fraud_binary` keeps all non-empty dialogue rows and uses labels `0` for non-fraud and `1` for fraud.
+- `fraud_multi` keeps only rows where `is_fraud == TRUE`, drops rows without `fraud_type`, and maps fraud types to integer labels.
+- `fraud_multi/test` must stay aligned by row order with the positive (`label=1`) rows of `fraud_binary/test`; adversarial source export depends on this.
+
+The label mapping is saved to:
+
+```text
+dataset/fraud_multi_label_mapping.json
+```
+
+You can also set `DATASET_ROOT` to another parent directory containing `fraud_binary/` and `fraud_multi/`.
